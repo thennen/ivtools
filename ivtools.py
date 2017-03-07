@@ -92,25 +92,38 @@ def load_from_txt(directory, pattern, **kwargs):
             # For now, read the first row and try to make sense of it
             with open(fp, 'r') as f:
                 header = f.readline()
-            # Try to split it by the normal delimiter
-            splitheader = header.split(readcsv_args['sep'])
-            if len(splitheader) > 1:
-                # Probably these are the column names? let read_csv handle it.
-                colnames = splitheader
-            else:
-                # The other format that I have seen is like 'col name [unit]'
-                # with a random number of spaces interspersed. Split after ].
-                colnames = re.findall('[^\]]+\]', header)
-                colnames = [c.strip() for c in colnames]
+                if header == '*********** I(V) ***********\n':
+                    skiprows = 8
+                    for _ in range(7):
+                        header = f.readline()
+                else:
+                    skiprows = 1
+                # Try to split it by the normal delimiter
+                splitheader = header.split(readcsv_args['sep'])
+                if len(splitheader) > 1:
+                    # Probably these are the column names?
+                    colnames = splitheader
+                else:
+                    # The other format that I have seen is like 'col name [unit]'
+                    # with a random number of spaces interspersed. Split after ].
+                    colnames = re.findall('[^\]]+\]', header)
+                    colnames = [c.strip() for c in colnames]
 
-            df = pd.read_csv(fp, skiprows=1, names=colnames, index_col=False, **readcsv_args)
+            df = pd.read_csv(fp, skiprows=skiprows, names=colnames, index_col=False, **readcsv_args)
 
-            # Rename 0th and 1st column to V and I and pray.....
+            # These will be recognized as the Voltage and Current columns
+            Vnames = ['Voltage Source (V)', 'Voltage [V]']
+            Inames = ['Current Probe (A)', 'Current [A]']
+            # Rename columns
             dfcols = df.columns
             if 'V' not in dfcols:
-                df.rename(columns={dfcols[0]:'V'}, inplace=True)
+                for Vn in Vnames:
+                    if Vn in dfcols:
+                        df.rename(columns={Vn:'V'}, inplace=True)
             if 'I' not in dfcols:
-                df.rename(columns={dfcols[1]:'I'}, inplace=True)
+                for In in Inames:
+                    if In in dfcols:
+                        df.rename(columns={In:'I'}, inplace=True)
             yield df
     # Have to make an intermediate list?  Hopefully this does not take too much time/memory
     # Probably it is not a lot of data if it came from a csv ....
