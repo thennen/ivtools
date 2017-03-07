@@ -21,25 +21,119 @@ plot many different things
 scatter parameters by cycle
 plot distributions
 IV loops with many options
+make movies
 
+Data type for a data set is a dict with keys 'iv', and 'meta'
+'Meta' is a dict containing metadata about the whole series
+'iv' is a numpy array of iv loop dicts
+the iv loop dicts have at least keys 'I', 'V', but can contain other arrays and information
 
 Tyler Hennen 2017
 '''
 
 import numpy as np
 from matplotlib import pyplot as plt
+import pandas as pd
 import heapq
+import re
 import os
+import fnmatch
+from dotdict import dotdict
+from itertools import groupby
+from operator import getitem
+
 
 ###################################################################
 # Functions for saving and loading data                          ##
 ###################################################################
 
+pjoin = os.path.join
+splitext = os.path.splitext
+
+def load_from_txt(directory, pattern, **kwargs):
+    ''' Load list of loops from separate text files. Specify files by glob
+    pattern.  kwargs are passed to loadtxt'''
+    fnames = fnmatch.filter(os.listdir(directory), pattern)
+
+    # Try to sort by file number, even if fixed width numbers are not used
+    # For now I will assume the filename ends in _(somenumber)
+    try:
+        fnames.sort(key=lambda fn: int(splitext(fn.split('_')[-1])[0]))
+    except:
+        print('Failed to sort files by file number')
+
+    print('Loading the following files:')
+    print('\n'.join(fnames))
+
+    fpaths = [pjoin(directory, fn) for fn in fnames]
+
+    ### List of np arrays version ..
+    # Load all the data
+    # loadtxt_args = {'unpack':True,
+    #                 'usecols':(0,1),
+    #                 'delimiter':'\t',
+    #                 'skiprows':1}
+    # loadtxt_args.update(kwargs)
+    # return [np.loadtxt(fp, **loadtxt_args) for fp in fpaths]
+
+    ### Array of DataFrames version
+    readcsv_args = dict(sep='\t', decimal='.')
+    readcsv_args.update(kwargs)
+    def txt_iter():
+        # Iterate through text files, load data, and modify in some way
+        # Using pandas here only because its read_csv can handle comma decimals easily..
+        # Will convert back to numpy arrays.
+        for fp in fpaths:
+            # TODO: Guess which column has Voltage and Current based on various
+            # different names people give them.  Here it seems the situation
+            # is very bad and sometimes there are no delimiters in the header.
+            # Even this is not consistent.
+
+            # For now, read the first row and try to make sense of it
+            with open(fp, 'r') as f:
+                header = f.readline()
+            # Try to split it by the normal delimiter
+            splitheader = header.split(readcsv_args['sep'])
+            if len(splitheader) > 1:
+                # Probably these are the column names? let read_csv handle it.
+                colnames = splitheader
+            else:
+                # The other format that I have seen is like 'col name [unit]'
+                # with a random number of spaces interspersed. Split after ].
+                colnames = re.findall('[^\]]+\]', header)
+                colnames = [c.strip() for c in colnames]
+
+            df = pd.read_csv(fp, skiprows=1, names=colnames, index_col=False, **readcsv_args)
+
+            # Rename 0th and 1st column to V and I and pray.....
+            dfcols = df.columns
+            if 'V' not in dfcols:
+                df.rename(columns={dfcols[0]:'V'}, inplace=True)
+            if 'I' not in dfcols:
+                df.rename(columns={dfcols[1]:'I'}, inplace=True)
+            yield df
+    # Have to make an intermediate list?  Hopefully this does not take too much time/memory
+    # Probably it is not a lot of data if it came from a csv ....
+    # This doesn't work because it tries to cast each dataframe into an array first ...
+    #return np.array(list(txt_iter()))
+    #return (list(txt_iter()), dict(source_directory=directory), [dict(filepath=fp) for fp in fpaths])
+    datalist = []
+    for fp, df in zip(fpaths, txt_iter()):
+        dd = dotdict(I=np.array(df['I']), V=np.array(df['V']), filepath=fp)
+        datalist.append(dd)
+    iv = np.array(datalist)
+
+    # regular dict version
+    #iv = np.array([{'I':np.array(df['I']), 'V':np.array(df['V']), 'filepath':fp} for fp, df in zip(fpaths, txt_iter())])
+    return dotdict(iv=iv, source_dir=directory)
+
+#**************************************
+#**** Not modified yet for new datatype
+#**************************************
 
 def write_data(data, fn):
     ''' Write list of [Vin, Vout] to disk '''
     # TODO: switch to less retarded format
-    # Maybe matlab format for those who haven't seen the light
     foldpath = datafolderpath()
     np.savez(os.path.join(foldpath, fn), *data)
 
@@ -91,29 +185,6 @@ def write_figs(data, fn=None, folder=None, subfolder=True):
         plt.ion()
 
 
-def datafolderpath(subfolder=None):
-    ''' Find data folder based on the values of some global variables '''
-    global SAMPLENAME
-    if SAMPLENAME is None:
-        if (R is not None) and (C is not None):
-            sampname = 'R{}_C{}'.format(R, C)
-        else:
-            sampname = 'NoName'
-    else:
-        sampname = SAMPLENAME
-
-    if not subfolder:
-        folder = os.path.join(str(WAFERID), sampname)
-    else:
-        folder = os.path.join(str(WAFERID), sampname, subfolder)
-
-    foldpath = os.path.join(DATADIR, folder)
-
-    if not os.path.isdir(foldpath):
-        os.makedirs(foldpath)
-    return foldpath
-
-
 def load_data(fn):
     ''' Get the array of [Vin, Vout]s back from file '''
     d = np.load(fn)
@@ -129,53 +200,269 @@ def load_data(fn):
 # Functions for data analysis                                    ##
 ###################################################################
 
+from functools import wraps
 
-########### These operate on single a single (V, I) ###############
+def ivfunc(func):
+    '''
+    Decorator which allows the same function to be used on a single loop, as
+    well as a container of loops.
+
+    Decorated function should take a single loop and return anything
+
+    Then this function will also take multiple loops, and return an array of the outputs
+    '''
+    @wraps(func)
+    def func_wrapper(data, *args, **kwargs):
+        dtype = type(data)
+        if dtype == np.ndarray:
+            # Assuming it's an ndarray of iv dicts
+            return np.array([func(d, *args, **kwargs) for d in data])
+        elif dtype == dotdict:
+            return(func(data, *args, **kwargs))
+        else:
+            print('ivfunc did not understand the input datatype {}'.format(dtype))
+    return func_wrapper
 
 
-def plot_data((a, b), ax=None, maxsamples=10000, arrows=False, **kwargs):
-    ''' Plot picoscope data, b vs a
+@ivfunc
+def moving_avg(data, window=5):
+    ''' Smooth data with moving avg '''
+    V = data['V']
+    I = data['I']
+    lenV = len(V)
+    lenI = len(I)
+    if lenI != lenV:
+        print('I and V arrays have different length!')
+        return data
+    if lenI == 0:
+        return data
+    weights = np.repeat(1.0, window)/window
+    smoothV = np.convolve(V, weights, 'valid')
+    smoothI = np.convolve(I, weights, 'valid')
+
+    new_data = data.copy()
+    new_data.update({'I':smoothI, 'V':smoothV})
+    return new_data
+
+
+@ivfunc
+def index_iv(data, index_function):
+    '''
+    Index all the data arrays inside an iv loop container at once.
+    Condition specified by index function, which should take an iv dict and return an indexing array
+    '''
+    # Determine the arrays that will be split
+    # We will select them now just based on which values are arrays with same size as I and V
+    lenI = len(data['I'])
+    splitkeys = [k for k,v in data.items() if (type(v) == np.ndarray and len(v) == lenI)]
+    dataout = data.copy()
+    for sk in splitkeys:
+        # Apply the filter to all the relevant items
+        index = np.array(index_function(data))
+        dataout[sk] = dataout[sk][index]
+    return dataout
+
+# Don't know about the name of this one yet
+@ivfunc
+def apply(data, func, column):
+    '''
+    This applies func to one column of the ivloop, and leaves the rest the same.
+    func should take an array and return an array of the same size
+    '''
+    dataout = data.copy()
+    dataout[column] = func(dataout[column])
+    return dataout
+
+@ivfunc
+def dV_sign(iv):
+    '''
+    Return boolean array indicating if V is increasing or constant.
+    Will not handle noisy data.  Have to dig up the code that I wrote to do that.
+    '''
+    direction = np.sign(np.diff(iv['V'])) > 0
+    # Need the same size array as started with. Categorize the first point same as second
+    return np.append(direction[0], direction)
+
+@ivfunc
+def interpolate(data, interpvalues, column='I'):
+    '''
+    Interpolate all the arrays in ivloop to new values of one of the columns
+    Right now this sorts the arrays according to "column"
+    would be nice if newvalues could be a function, or an array of arrays ...
+    '''
+    lenI = len(data[column])
+    interpkeys = [k for k,v in data.items() if (type(v) == np.ndarray and len(v) == lenI)]
+    interpkeys = [ik for ik in interpkeys if ik != column]
+
+    # Get the largest monotonic subsequence of data, with 'column' increasing
+    dataout = largest_monotonic(data)
+
+    # not doing this anymore, but might want the code for something else
+    #saturated = abs(dataout[column]/dataout[column][-1]) - 1 < 0.0001
+    #lastindex = np.where(saturated)[0][0]
+    #dataout[column] = dataout[column][:lastindex]
+
+    for ik in interpkeys:
+        dataout[ik] = np.interp(interpvalues, dataout[column], dataout[ik])
+    dataout[column] = interpvalues
+
+    return dataout
+
+
+@ivfunc
+def largest_monotonic(data, column='I'):
+    ''' returns the segment of the iv loop that is monotonic in 'column', and
+    spans the largest range of values.  in output, 'column' will be increasing
+    Mainly used for interpolation function.
+
+    Could pass in a function that operates on the segments to determine which one is "largest"
+    '''
+    lenI = len(data[column])
+    keys = [k for k,v in data.items() if (type(v) == np.ndarray and len(v) == lenI)]
+
+    # interp has a problem if the function is not monotonically increasing.
+    # Find all monotonic sections of the data, use the longest section,
+    # reversing it if it's decreasing This will have problems if 'column'
+    # contains noisy data.  Deal with this for now by printing some warnings if
+    # no segment of significant length is monotonic
+
+    sign = np.sign(np.diff(data[column]))
+    # Group by the sign of the first difference to get indices
+    gpby = groupby(enumerate(sign, 0), lambda item: sign[item[0]])
+    # Making some lists because I can't think of a better way at the moment
+    # Sorry for these horrible lines. It's a list of tuples, (direction, (i,n,d,i,c,e,s))
+    monolists = [(gp[0], *zip(*list(gp[1]))) for gp in gpby if abs(gp[0]) == 1]
+    directions, indices, _ = zip(*monolists)
+    segment_endpoints = [(ind[0], ind[-1] + 2) for ind in indices]
+    #return segment_endpoints
+    #start_indices, end_indices = zip(*[(ind[0], ind[-1] + 1) for ind in indices])
+    # Finally, list of (direction, startindex, endindex) for all monotonic segments
+    columnsegments = [data[column][start:end] for (start, end) in segment_endpoints]
+    segment_spans = [max(vals) - min(vals) for vals in columnsegments]
+    largest = np.argmax(segment_spans)
+    direction = int(directions[largest])
+    startind, endind = segment_endpoints[largest]
+
+    dataout = data.copy()
+    for k in keys:
+        dataout[k] = dataout[k][startind:endind][::direction]
+
+    return dataout
+
+
+@ivfunc
+def longest_monotonic(data, column='I'):
+    ''' returns the largest segment of the iv loop that is monotonic in
+    'column'.  in output, 'column' will be increasing Mainly used for
+    interpolation function. '''
+    lenI = len(data[column])
+    keys = [k for k,v in data.items() if (type(v) == np.ndarray and len(v) == lenI)]
+
+    # interp has a problem if the function is not monotonically increasing.
+    # Find all monotonic sections of the data, use the longest section,
+    # reversing it if it's decreasing This will have problems if 'column'
+    # contains noisy data.  Deal with this for now by printing some warnings if
+    # no segment of significant length is monotonic
+
+    sign = np.sign(np.diff(data[column]))
+    # Group by the sign of the first difference to get indices
+    gpby = groupby(enumerate(sign, 0), lambda item: sign[item[0]])
+    # Making some lists because I can't think of a better way at the moment
+    monolists = [(gp[0], list(gp[1])) for gp in gpby if abs(gp[0]) == 1]
+    segment_lengths = [len(gp[1]) for gp in monolists]
+    longest = np.argmax(segment_lengths)
+    if segment_lengths[longest] < lenI * 0.4:
+        print('No monotonic segments longer than 40% of the {} array were found!'.format(column))
+    direction = int(monolists[longest][0])
+    startind = monolists[longest][1][0][0]
+    endind = monolists[longest][1][-1][0] + 2
+
+    dataout = data.copy()
+    for k in keys:
+        dataout[k] = dataout[k][startind:endind][::direction]
+
+    return dataout
+
+
+@ivfunc
+def normalize(data):
+    ''' Normalize by the maximum current '''
+    dataout = data.copy()
+    maxI = np.max(data['I'])
+    dataout['I'] = dataout['I'] / maxI
+    return dataout
+
+
+def plot_iv(data, ax=None, maxsamples=10000, cm='jet', **kwargs):
+    '''
+    IV loop plotting which can handle single or multiple loops.
     maxsamples : downsample to this number of data points if necessary
-    kwargs passed through to ax.plot'''
+    kwargs passed through to ax.plot
+    New figure is created if ax=None
+
+    TODO: Plot arbitrary keys on x and y axis.  Make global dictionary for
+    finding long names and units
+    Maybe pass an arbitrary plotting function
+    '''
     if ax is None:
         fig, ax = plt.subplots()
+    ax.set_xlabel('Voltage')
+    ax.set_ylabel('Current')
 
-    l = len(a)
-    if maxsamples is not None and maxsamples < l:
-        # Down sample data
-        step = int(l/maxsamples)
-        a = a[range(0, l, step)]
-        b = b[range(0, l, step)]
+    def plot_one_iv(iv, ax, **kwargs):
+        l = len(iv['V'])
+        if maxsamples is not None and maxsamples < l:
+            # Down sample data
+            step = int(l/maxsamples)
+            V = iv['V'][np.arange(0, l, step)]
+            I = iv['I'][np.arange(0, l, step)]
+        else:
+            V = iv['V']
+            I = iv['I']
 
-    line = ax.plot(a, b, **kwargs)[0]
-    ax.set_xlabel('V (Channel A)')
-    ax.set_ylabel('V (Channel B)')
+        return ax.plot(V, I, **kwargs)[0]
 
-    if arrows:
-        # Plot some arrows to indicate which direction the sweep is going
-        # Not very pretty at this time ...
-        l = len(a)
-        for i in np.linspace(l/8., 7/8.*l, 4):
-            di = l/40.
-            ax.annotate('', xy=(a[i+di], b[i+di]), xycoords='data',
-                        xytext=(a[i], b[i]), textcoords='data',
-                        arrowprops=dict(headwidth=20, frac=0.4))
-    # plt.show()
+    dtype = type(data)
+    if dtype == np.ndarray:
+        # There are many loops
+        line = []
+        # Pick colors
+        if isinstance(cm, str):
+            cmap = plt.cm.get_cmap(cm)
+        else:
+            cmap = cm
+        colors = [cmap(c) for c in np.linspace(0, 1, len(data))]
+        for iv, c in zip(data, colors):
+            kwargs.update(c=c)
+            line.append(plot_one_iv(iv, ax=ax, **kwargs))
+    elif dtype == dotdict:
+        line = plot_one_iv(data, ax, **kwargs)
+    else:
+        print('plot_iv did not understand the input datatype {}'.format(dtype))
 
     return ax, line
 
-
+@ivfunc
 def moving_avg(data, window=5):
     ''' Smooth data with moving avg '''
-    a, b = data
-    if len(a) == 0 or len(b) == 0:
-        return a, b
+    V = data['V']
+    I = data['I']
+    lenV = len(V)
+    lenI = len(I)
+    if lenI != lenV:
+        print('I and V arrays have different length!')
+        return data
+    if lenI == 0:
+        return data
     weights = np.repeat(1.0, window)/window
-    smootha = np.convolve(a, weights, 'valid')
-    smoothb = np.convolve(b, weights, 'valid')
+    smoothV = np.convolve(V, weights, 'valid')
+    smoothI = np.convolve(I, weights, 'valid')
 
-    return smootha, smoothb
+    return {'I':I, 'V':V}
 
+#**************************************
+#**** Not modified yet for new datatype
+#**************************************
 
 def resistance(data, R2=2000., fitrange=None):
     ''' Try to calculate resistance from Vin, Vout curve, given resistance used
@@ -430,44 +717,6 @@ def valid_fitrange(fitrange, fieldarray=None):
     return fr
 
 
-def normalize(H, M, fitrange=('75%', '100%'), fitbranch=False):
-    ''' Normalize loop: subtract offset and scale based on data in fit range '''
-
-    fitrange = valid_fitrange(fitrange, H)
-
-    dHdir = np.diff(H) < 0
-    dHdir = np.append(dHdir[0], dHdir)
-    #
-    if fitbranch:
-        # Field is high and decreasing
-        fitmask1 = dHdir & (H < fitrange[3]) & (H > fitrange[2])
-        # Field is low and increasing
-        fitmask2 = ~dHdir & (H < fitrange[1]) & (H > fitrange[0])
-    else:
-        fitmask1 = (H < fitrange[3]) & (H > fitrange[2])
-        fitmask2 = (H < fitrange[1]) & (H > fitrange[0])
-
-    mean1 = mean2 = None
-    if any(fitmask1):
-        mean1 = np.mean(M[fitmask1])
-    if any(fitmask2):
-        mean2 = np.mean(M[fitmask2])
-
-    if mean1 is not None and mean2 is not None:
-        amp = (mean1 - mean2) / 2
-        offset = (mean1 + mean2) / 2
-    elif mean1 is not None:
-        amp = mean1
-        offset = 0
-    elif mean2 is not None:
-        amp = mean2
-        offset = 0
-    else:
-        raise Exception('No data points in fit range')
-
-    return amp, offset
-
-
 def interpM(H, M, newH):
     '''
     Interpolate one hysteresis loop/branch to new H values.  Conscious of
@@ -547,17 +796,6 @@ def smooth(H, M, window=5):
 
 ########### These operate on a list of (V, I) #####################
 
-
-def plot_datalist(datalist, cm='jet', **kwargs):
-    fig, ax = plt.subplots()
-    if isinstance(cm, str):
-        cmap = plt.cm.get_cmap(cm)
-    else:
-        cmap = cm
-
-    colors = [cmap(c) for c in np.linspace(0, 1, len(datalist))]
-    for d, c in zip(datalist, colors):
-        plot_data(d, c=c, ax=ax, **kwargs)
 
 
 def filt_datalist(datalist, window=5):
@@ -813,4 +1051,11 @@ def plot_switching_v(datalist, level, **kwargs):
 
     return Vswitch
 
+### This makes a movie from png frames
 
+def frames_to_mp4(directory, base='Loop', outname='out'):
+    # Send command to create video with ffmpeg
+    cmd = (r'cd "{}" & ffmpeg -framerate 5 -i {}_%03d.png -c:v libx264 '
+            '-r 15 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" '
+            '{}.mp4').format(directory, base, outname)
+    os.system(cmd)
