@@ -132,7 +132,12 @@ def load_from_txt(directory, pattern, **kwargs):
     #return (list(txt_iter()), dict(source_directory=directory), [dict(filepath=fp) for fp in fpaths])
     datalist = []
     for fp, df in zip(fpaths, txt_iter()):
-        dd = dotdict(I=np.array(df['I']), V=np.array(df['V']), filepath=fp)
+        mtime = os.path.getmtime(fp)
+        ctime = os.path.getctime(fp)
+        longnames = {'I':'Current', 'V':'Voltage'}
+        units = {'I':'A', 'V':'V'}
+        dd = dotdict(I=np.array(df['I']), V=np.array(df['V']), filepath=fp,
+                     mtime=mtime, ctime=ctime, units=units, longnames=longnames)
         datalist.append(dd)
     iv = np.array(datalist)
 
@@ -406,7 +411,50 @@ def normalize(data):
     return dataout
 
 
-def plot_iv(data, ax=None, maxsamples=10000, cm='jet', **kwargs):
+def plot_one_iv(iv, ax=None, x='V', y='I', maxsamples=10000, **kwargs):
+    ''' Plot an array vs another array contained in iv object '''
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    l = len(iv[y])
+    Y = iv[y]
+    if x is None:
+        X = np.arange(l)
+    else:
+        X = iv[x]
+    if maxsamples is not None and maxsamples < l:
+        # Down sample data
+        step = int(l/maxsamples)
+        X = X[np.arange(0, l, step)]
+        Y = Y[np.arange(0, l, step)]
+
+    # Try to name the axes according to metadata
+    if x == 'V': longnamex = 'Voltage'
+    elif x is None:
+        longnamex = 'Data Point'
+    else: longnamex = x
+    if y == 'I': longnamey = 'Current'
+    else: longnamey = y
+    if 'longnames' in iv.keys():
+        if x in iv['longnames'].keys():
+            longnamex = iv['longnames'][x]
+        if y in iv['longnames'].keys():
+            longnamey = iv['longnames'][y]
+    if x is None: unitx = '#'
+    else: unitx = '?'
+    unity = '?'
+    if 'units' in iv.keys():
+        if x in iv['units'].keys():
+            unitx = iv['units'][x]
+        if y in iv['units'].keys():
+            unity = iv['units'][y]
+
+    ax.set_xlabel('{} [{}]'.format(longnamex, unitx))
+    ax.set_ylabel('{} [{}]'.format(longnamey, unity))
+
+    return ax.plot(X, Y, **kwargs)[0]
+
+def plotiv(data, ax=None, x='V', y='I', maxsamples=10000, cm='jet', **kwargs):
     '''
     IV loop plotting which can handle single or multiple loops.
     maxsamples : downsample to this number of data points if necessary
@@ -419,21 +467,6 @@ def plot_iv(data, ax=None, maxsamples=10000, cm='jet', **kwargs):
     '''
     if ax is None:
         fig, ax = plt.subplots()
-    ax.set_xlabel('Voltage')
-    ax.set_ylabel('Current')
-
-    def plot_one_iv(iv, ax, **kwargs):
-        l = len(iv['V'])
-        if maxsamples is not None and maxsamples < l:
-            # Down sample data
-            step = int(l/maxsamples)
-            V = iv['V'][np.arange(0, l, step)]
-            I = iv['I'][np.arange(0, l, step)]
-        else:
-            V = iv['V']
-            I = iv['I']
-
-        return ax.plot(V, I, **kwargs)[0]
 
     dtype = type(data)
     if dtype == np.ndarray:
@@ -447,11 +480,11 @@ def plot_iv(data, ax=None, maxsamples=10000, cm='jet', **kwargs):
         colors = [cmap(c) for c in np.linspace(0, 1, len(data))]
         for iv, c in zip(data, colors):
             kwargs.update(c=c)
-            line.append(plot_one_iv(iv, ax=ax, **kwargs))
+            line.append(plot_one_iv(iv, ax=ax, x=x, y=y, maxsamples=maxsamples, **kwargs))
     elif dtype == dotdict:
         line = plot_one_iv(data, ax, **kwargs)
     else:
-        print('plot_iv did not understand the input datatype {}'.format(dtype))
+        print('plotiv did not understand the input datatype {}'.format(dtype))
 
     return ax, line
 
@@ -730,36 +763,6 @@ def valid_fitrange(fitrange, fieldarray=None):
     return fr
 
 
-def interpM(H, M, newH):
-    '''
-    Interpolate one hysteresis loop/branch to new H values.  Conscious of
-    increasing/decreasing H values. Can use newH with at most one direction
-    change.
-    '''
-    Hsplit, Msplit = split(H, M)
-    newHsplit, _ = split(newH, np.zeros(len(newH)))
-#    if len(newHsplit) > 2:
-#        raise Exception('newH changes direction more than once')
-#    if len(Hsplit) > 2:
-#        raise Exception('H changes direction more than once')
-#
-#
-#
-#    for newHseg in newHsplit:
-#        newdir = (newHseg[1] - newHseg[0]) > 0
-#        for Hseg in Hsplit:
-#            dir = (Hseg[1] - Hseg[0]) > 0
-#            if newdir == dir:
-#                pass
-#
-#    return np.append(M1interp, M2interp)
-
-
-def interpH(H, M, newM):
-    ''' Interpolate a hysteresis loop to new M values '''
-    pass
-
-
 def split(H, M, shortest=2, loops=False):
     '''
     Split hysteresis loops into segments by field change direction.  Throw out
@@ -829,158 +832,33 @@ def concat(datalist):
     return concatdata
 
 
-def hc(H, M, method='avg', mpercent=10):
-    ''' calculate Hc '''
-    # split into two branches and fit Hc
-    amp = np.max(np.abs(M))
-    [H1, H2], [M1, M2] = split(H, M)
-    mask1 = np.abs(M1) < (mpercent/100. * amp)
-    mask2 = np.abs(M2) < (mpercent/100. * amp)
-    Hcfit1 = np.polyfit(H1[mask1], M1[mask1], 1)
-    Hcfit2 = np.polyfit(H2[mask2], M2[mask2], 1)
-    Hc1 = -Hcfit1[1]/Hcfit1[0]
-    Hc2 = -Hcfit2[1]/Hcfit2[0]
-
-    if method == 'avg':
-        return np.abs(Hc2 - Hc1) / 2.
-    elif method == 'left':
-        return np.min((Hc1, Hc2))
-    elif method == 'right':
-        return np.max((Hc1, Hc2))
-    else:
-        raise Exception('"method" can be \'left\', \'right\', or \'avg\'')
-
-
-def recoil(Hlist, Mlist, startdef=0, satrange=('85%', '95%'), plot=False):
-    '''
-    Extract parameters from recoil data.  Input list of recoil curves, first
-    being the major loop.
-    startdef:
-    0: minor loops start from remnant value
-    1: minor loops start from initial value
-    '''
-
-    # only doing +- 0.5 point, can be extended later
-    Mlevels = [-0.5, 0.5]
-
-    # Find amp and offs from major loop
-    amp, offs = normalize(Hlist[0], Mlist[0], fitrange=satrange, fitbranch=False)
-    Minterp = np.array([amp*m + offs for m in Mlevels])
-    # H interp will be a list of H values corresponding to the M values.  Each
-    # list element corresponding to a loop
-    Hinterp = []
-
-    Mr = []
-    dH_ext = []
-    # initial values of H, M for each minor loop
-    Minit= []
-    Hinit = []
-    # Extract remnant values, initial values, dH values
-    for H, M in zip(Hlist, Mlist):
-        # find 10 points nearest 0, fit a parabola to find intercept.
-        argmin = np.abs(H).argmin()
-        slice_ = slice(argmin-5, argmin+5)
-        pfit = np.polyfit(H[slice_], M[slice_], 2)
-        mr = np.polyval(pfit, 0)
-        Mr.append(mr)
-        # average first 10 points for starting M
-        minit= np.mean(M[:10])
-        Minit.append(minit)
-        # Find M value where minor loop has half-returned to saturation
-        if startdef == 0:
-            mhalf = mr + (amp + offs - mr)/2
-        elif startdef == 1:
-            mhalf = minit + (amp + offs - minit)/2
-
-        # interp for Minterp -- could behave badly in regions where M is not
-        # monotonic
-        h = np.interp(Minterp, M, H, left=np.NaN, right = np.NaN)
-        Hinterp.append(h)
-
-        # Calculate dH_ext by subtracting H_minorloop(mhalf) from H_majorloop(-mhalf)
-        hhalf = np.interp(mhalf, M, H)
-        majhhalf = np.interp(-mhalf+2*offs, Mlist[0], Hlist[0])
-
-        dH_ext.append(hhalf - majhhalf)
-
-    # Calculate SFD parameters
-    Hnhalf_major = Hinterp[0][Mlevels.index(-0.5)]
-    Hhalf_major = Hinterp[0][Mlevels.index(0.5)]
-    dH_int = [Hhalf_major - h[Mlevels.index(0.5)] for h in Hinterp]
-    SFD = Hhalf_major - Hnhalf_major
-
-    # Interpolate dH_int, dH_ext, to get iSFD, eSFD
-    # First sort everything by Mstart value
-    if startdef == 0:
-        Mstart, dH_int, dH_ext, Hlist, Mlist = zip(*sorted(zip(Mr, dH_int, dH_ext, Hlist, Mlist)))
-    elif startdef == 1:
-        Mstart, dH_int, dH_ext, Hlist, Mlist = zip(*sorted(zip(Minit, dH_int, dH_ext, Hlist, Mlist)))
-    if max(Mstart) > 0 and min(Mstart) < 0:
-        iSFD = np.interp(0, Mstart, dH_int)
-        eSFD = np.interp(0, Mstart, dH_ext)
-        # interpolate to get entire M=0 loop
-        nearz = heapq.nsmallest(2, Mstart, key=abs)
-        nearz.sort()
-        i_neg = Mstart.index(nearz[0])
-        i_pos = Mstart.index(nearz[1])
-        interplower = np.interp(Hlist[i_pos], Hlist[i_neg], Mlist[i_neg])
-        H_zminor = Hlist[i_pos]
-        weight = 1/(1 - nearz[0]/nearz[1])
-        #M_zminor = [((1 - weight)*mp + weight*mn) for mp,mn in zip(Mlist[i_pos], interplower)]
-        M_zminor = (1-weight)*Mlist[i_pos] + weight*interplower
-    else:
-        # if minor loop starting points to not cross M=0, fit parabola to dH vs
-        # Mstart to get Mstart=0 value
-        iSFD_fit = np.polyfit(Mstart, dH_int, 2)
-        eSFD_fit = np.polyfit(Mstart, dH_ext, 2)
-        iSFD = np.polyval(iSFD_fit, 0)
-        eSFD = np.polyval(eSFD_fit, 0)
-        # TODO: extrap for M=0 loop
-        # for now, using closest to M=0 loop
-        nearestz = min(Mstart, key=abs)
-        H_zminor = Hlist[Mstart.index(nearestz)]
-        M_zminor = Mlist[Mstart.index(nearestz)]
-
-
-    if plot:
-        from matplotlib import pyplot as plt
-
-        # TODO: be explicit
-        fig = plt.figure()
-        ax = fig.add_subplot(111)
-        ax.hold(True)
-        for H, M, hinterp in zip(Hlist, Mlist, Hinterp):
-            plt.plot(H, M)
-            # plot Hinterp, Minterp
-            plt.plot(hinterp, Minterp, 'o')
-            # print parameters on graph
-        try:
-            # plot interpolated minor loop
-            plt.plot(H_zminor, M_zminor, linewidth=3, color='black')
-        except:
-            pass
-
-        plt.grid(True)
-        plt.xlabel('H')
-        plt.ylabel('M')
-
-    pdict = {}
-    pdict['SFD'] = SFD
-    pdict['iSFD'] = iSFD
-    pdict['eSFD'] = eSFD
-    pdict['Mstart'] = Mstart
-    pdict['H_zminor'] = H_zminor
-    pdict['M_zminor'] = M_zminor
-    pdict['plotpts'] = [(Hhalf_major, offs+amp/2),
-                        (Hnhalf_major, offs-amp/2),
-                        (Hhalf_major-iSFD, offs+amp/2)]
-
-    return pdict
-
-
 ###################################################################
 # Functions for plotting                                         ##
 ###################################################################
+
+
+def write_pngs(data, directory, **kwargs):
+    ''' Write a png of each of the iv loops to disk.  kwargs passed to plot() '''
+    if not os.path.isdir(directory):
+        os.makedirs(directory)
+    fig, ax = plt.subplots()
+    for i, ivloop in enumerate(data):
+        line = plot_one_iv(ivloop, ax=ax, **kwargs)
+        title = 'Loop {}'.format(i)
+        if 'filepath' in ivloop.keys():
+            fp = ivloop['filepath']
+            origin_fname = os.path.split(fp)[1]
+            fname = os.path.splitext(origin_fname)[0] + '.png'
+            title = '{}: {}'.format(title, origin_fname)
+        else:
+            fname = 'Loop_{:03d}'.format(i)
+
+        ax.set_title(title)
+        fig.savefig(os.path.join(directory, fname))
+        ax.cla()
+
+
+### Not modified for new data type
 
 def plot_resist_cycle(datalist, fitrange=(-.5, .5), alpha=.6):
     ''' Plot resistance of increasing and decreasing loop branches
