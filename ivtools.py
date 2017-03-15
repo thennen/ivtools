@@ -16,6 +16,13 @@ find anomalous loops
 Interpolate to new I/V values
 save in/ load from a sensible format
 load from insensible formats
+first pos jump
+last neg jump
+threshon
+threshoff
+fitpoly
+plotpoly
+calc resistance/differential resistance
 
 plot many different things
 scatter parameters by cycle
@@ -169,40 +176,6 @@ def write_fig(fn='plot', fig=None):
     print('Saved to' + fpath)
 
 
-def write_figs(data, fn=None, folder=None, subfolder=True):
-    ''' Save figs for all sweeps to folder.
-    fn : filename for data, also subfolder name if subfolder is True.
-    folder : folder to save data.  Determine from global variables if None
-    '''
-    # TODO: don't silently overwrite
-    if fn is not None:
-        fnprefix = '{}_sweep_'.format(fn)
-    else:
-        fn = 'noname'
-        fnprefix = 'sweep_'
-
-    if subfolder:
-        foldpath = datafolderpath(subfolder=fn)
-    else:
-        foldpath = datafolderpath()
-
-    if not os.path.isdir(foldpath):
-        os.makedirs(foldpath)
-
-    wasinteractive = plt.isinteractive()
-    plt.ioff()
-    for i, d in enumerate(data):
-        fig, ax = plt.subplots()
-        ax.set_title(str(i))
-        plot_data(d, ax=ax, maxsamples=10000)
-        fpath = os.path.join(foldpath, '{}{}.png'.format(fnprefix, i))
-        fig.savefig(fpath, dpi=200)
-        plt.close(fig)
-        print('Saved ' + fpath)
-    if wasinteractive:
-        plt.ion()
-
-
 def load_data(fn):
     ''' Get the array of [Vin, Vout]s back from file '''
     d = np.load(fn)
@@ -286,6 +259,7 @@ def apply(data, func, column):
     '''
     This applies func to one column of the ivloop, and leaves the rest the same.
     func should take an array and return an array of the same size
+    TODO:  Do this in place!
     '''
     dataout = data.copy()
     dataout[column] = func(dataout[column])
@@ -294,12 +268,22 @@ def apply(data, func, column):
 @ivfunc
 def dV_sign(iv):
     '''
-    Return boolean array indicating if V is increasing or constant.
+    Return boolean array indicating if V is increasing, decreasing, or constant.
     Will not handle noisy data.  Have to dig up the code that I wrote to do that.
     '''
-    direction = np.sign(np.diff(iv['V'])) > 0
-    # Need the same size array as started with. Categorize the first point same as second
-    return np.append(direction[0], direction)
+    direction = np.sign(np.diff(iv['V']))
+    # Need the same size array as started with. Categorize the last point same as previous 
+    return np.append(direction, direction[-1])
+
+@ivfunc
+def decreasing(iv):
+    return index_iv(iv, lambda l: dV_sign(iv) < 0)
+
+
+@ivfunc
+def increasing(iv):
+    return index_iv(iv, lambda l: dV_sign(iv) > 0)
+
 
 @ivfunc
 def interpolate(data, interpvalues, column='I'):
@@ -367,6 +351,28 @@ def largest_monotonic(data, column='I'):
 
     return dataout
 
+@ivfunc
+def jumps(loop, column='I', thresh=0.25):
+    ''' Find jumps in the data.  thresh given as fraction of maximum absolute value.  Deal with it.
+    return indices, values of jumps
+    '''
+    d = diff(loop[column])
+    # Find jumps greater than thresh * 100% of the maximum
+    jumps = np.where(abs(d) > thresh * np.max(np.abs(loop[column])))[0]
+    return jumps, d[jumps]
+
+@ivfunc
+def njumps(loop, **kwargs):
+    j = jumps(loop, **kwargs)
+    return len(j[0])
+
+
+@ivfunc
+def first_jump(loop):
+    pass
+
+
+
 
 @ivfunc
 def longest_monotonic(data, column='I'):
@@ -416,12 +422,18 @@ def plot_one_iv(iv, ax=None, x='V', y='I', maxsamples=10000, **kwargs):
     if ax is None:
         fig, ax = plt.subplots()
 
-    l = len(iv[y])
-    Y = iv[y]
+    if type(y) == str:
+        Y = iv[y]
+    else:
+        Y = y
+    l = len(Y)
+
     if x is None:
         X = np.arange(l)
-    else:
+    elif type(x) == str:
         X = iv[x]
+    else:
+        X = x
     if maxsamples is not None and maxsamples < l:
         # Down sample data
         step = int(l/maxsamples)
@@ -429,10 +441,12 @@ def plot_one_iv(iv, ax=None, x='V', y='I', maxsamples=10000, **kwargs):
         Y = Y[np.arange(0, l, step)]
 
     # Try to name the axes according to metadata
+    # Will error right now if you pass array as x or y
     if x == 'V': longnamex = 'Voltage'
     elif x is None:
         longnamex = 'Data Point'
-    else: longnamex = x
+    elif type(x) == str:
+        longnamex = x
     if y == 'I': longnamey = 'Current'
     else: longnamey = y
     if 'longnames' in iv.keys():
@@ -461,8 +475,6 @@ def plotiv(data, ax=None, x='V', y='I', maxsamples=10000, cm='jet', **kwargs):
     kwargs passed through to ax.plot
     New figure is created if ax=None
 
-    TODO: Plot arbitrary keys on x and y axis.  Make global dictionary for
-    finding long names and units
     Maybe pass an arbitrary plotting function
     '''
     if ax is None:
@@ -482,7 +494,7 @@ def plotiv(data, ax=None, x='V', y='I', maxsamples=10000, cm='jet', **kwargs):
             kwargs.update(c=c)
             line.append(plot_one_iv(iv, ax=ax, x=x, y=y, maxsamples=maxsamples, **kwargs))
     elif dtype == dotdict:
-        line = plot_one_iv(data, ax, **kwargs)
+        line = plot_one_iv(data, ax, x=x, y=y, maxsamples=maxsamples, **kwargs)
     else:
         print('plotiv did not understand the input datatype {}'.format(dtype))
 
@@ -585,183 +597,6 @@ def switching_v(data, level):
 
 ###### From hystools, maybe useful ##########
 
-def easy_params(H, M, satrange=('75%', '95%'), mpercent=10, hpercent=5, plot=False):
-    ''' calculate loop parameters by line extrapolation: hc, hn, hs '''
-    # TODO: expand fit ranges if they result in poorly conditioned fits
-    Ms, offset = normalize(H, M, satrange, fitbranch=True)
-    # ignore offset
-    offset = 0
-    # split loop into two branches, without knowing which is which
-    [H1, H2], [M1, M2] = split(H, M)
-    maskflag = False
-    while maskflag is False:
-        Hcmask1 = np.abs(M1) < (mpercent/100. * Ms)
-        Hcmask2 = np.abs(M2) < (mpercent/100. * Ms)
-        if sum(Hcmask1) > 1 and sum(Hcmask2) > 1:
-            maskflag = True
-        else:
-            mpercent += 1
-    Hcfit1 = np.polyfit(H1[Hcmask1], M1[Hcmask1], 1)
-    Hcfit2 = np.polyfit(H2[Hcmask2], M2[Hcmask2], 1)
-    # Loop should start from max field
-    # TODO: generalize for loop starting from any field
-
-    # From first hys branch
-    Hc1 = -Hcfit1[1]/Hcfit1[0]
-    Hn1 = (Ms+offset-Hcfit1[1])/Hcfit1[0]
-    Hs1 = (-Ms-offset-Hcfit1[1])/Hcfit1[0]
-    # From second hys branch
-    Hc2 = -Hcfit2[1]/Hcfit2[0]
-    Hn2 = (-Ms-offset-Hcfit2[1])/Hcfit2[0]
-    Hs2 = (Ms+offset-Hcfit2[1])/Hcfit2[0]
-    # Calculate averages
-    Hc = (np.max([Hc1, Hc2]) - np.min([Hc1, Hc2]))/2
-    Hn = (np.max([Hn1, Hn2]) - np.min([Hn1, Hn2]))/2
-    Hs = (np.max([Hs1, Hs2]) - np.min([Hs1, Hs2]))/2
-
-    # Fit poly to points near H=0 to find Mr
-    maxH = np.max(np.abs(H))
-    maskflag = False
-    while maskflag is False:
-        Mrmask1 = np.abs(H1) < max(H)*hpercent/100
-        Mrmask2 = np.abs(H2) < max(H)*hpercent/100
-        if sum(Mrmask1) > 2 and sum(Mrmask2) > 2:
-            maskflag = True
-        else:
-            hpercent += 1
-    Mrfit1 = np.polyfit(H1[Mrmask1], M1[Mrmask1], 2)
-    Mrfit2 = np.polyfit(H2[Mrmask2], M2[Mrmask2], 2)
-    Mr1 = np.polyval(Mrfit1, 0)
-    Mr2 = np.polyval(Mrfit2, 0)
-    Mr = (np.max([Mr1, Mr2]) - np.min([Mr1, Mr2]))/2
-
-    if plot:
-        from matplotlib import pyplot as plt
-        lenH = len(H)
-        maxM = np.max(M)
-        minM = np.min(M)
-        # plot input hysteresis loop
-        plt.plot(H, M)
-        plt.hold(True)
-        # TODO: be explicit
-        # plot saturation lines
-        plt.plot(H, [Ms+offset]*len(H))
-        plt.plot(H, [-Ms-offset]*len(H))
-        # plot Hc lines
-        plt.plot(H, np.polyval(Hcfit1, H))
-        plt.plot(H, np.polyval(Hcfit2, H))
-        # plot Mr mark
-        plt.plot([0,0], [Mr1, Mr2], 'o')
-        # print parameters on graph
-
-        plt.grid(True)
-        plt.ylim((minM*1.1, maxM*1.1))
-        plt.xlabel('H')
-        plt.ylabel('M')
-
-    pdict = {}
-    pdict['Ms'] = Ms
-    pdict['Mr'] = Mr
-    pdict['Hn'] = Hn
-    pdict['Hs'] = Hs
-    pdict['Hc'] = Hc
-    pdict['Hc1'] = Hc1
-    pdict['Hc2'] = Hc2
-    pdict['Hn1'] = Hn1
-    pdict['Hn2'] = Hn2
-    pdict['Hs1'] = Hs1
-    pdict['Hs2'] = Hs2
-    pdict['Mr1'] = Mr1
-    pdict['Mr2'] = Mr2
-    pdict['Hcslope1'] = Hcfit1[0]
-    pdict['Hcslope2'] = Hcfit2[0]
-    pdict['offset'] = offset
-
-    return pdict
-
-
-def slope(H, M, fitrange=['75%','95%'], method='avg', fitbranch=True):
-    ''' calculate slope of loop by fitting a line to a field range '''
-
-    fitrange = valid_fitrange(fitrange, H)
-
-    dHdir = np.diff(H) < 0
-    dHdir = np.append(dHdir[0], dHdir)
-    # Find range of data for fits
-    if fitbranch:
-        # Field is high and decreasing
-        fitmask1 = dHdir & (H < fitrange[3]) & (H > fitrange[2])
-        # Field is low and increasing
-        fitmask2 = ~dHdir & (H < fitrange[1]) & (H > fitrange[0])
-    else:
-        fitmask1 = (H < fitrange[3]) & (H > fitrange[2])
-        fitmask2 = (H < fitrange[1]) & (H > fitrange[0])
-
-    fit1 = fit2 = None
-    if any(fitmask1):
-        fit1 = np.polyfit(H[fitmask1], M[fitmask1], 1)
-    if any(fitmask2):
-        fit2 = np.polyfit(H[fitmask2], M[fitmask2], 1)
-
-    if method == 'avg':
-        if fit1 is not None and fit2 is not None:
-            slope = (fit1[0] + fit2[0]) / 2
-            offset = (fit1[1] + fit2[1]) / 2
-        elif fit1 is not None:
-            slope = fit1[0]
-            offset = 0
-        elif fit2 is not None:
-            slope = fit2[0]
-            offset = 0
-        else:
-            raise Exception('No data points in fit range')
-    elif method == 'left':
-        if fit2 is not None:
-            slope = fit2[0]
-            offset = 0
-        else:
-            raise Exception('No data points in fit range')
-    elif method == 'right':
-        if fit1 is not None:
-            slope = fit1[0]
-            offset = 0
-        else:
-            raise Exception('No data points in fit range')
-
-    return slope, offset
-
-
-def valid_fitrange(fitrange, fieldarray=None):
-    '''
-    Try to make sense of input fitrange and return a valid fitrange list
-    with len 4.  If any elements of fitrange are a percentage, fieldarray must
-    be given
-    '''
-    # Convert any % in fitrange to field values
-    fr = []
-    if fieldarray is not None:
-        maxfield = np.max(fieldarray)
-        minfield = np.min(fieldarray)
-    for val in fitrange:
-        if isinstance(val, str):
-            # if this errors, the string wasn't understood or fieldarray wasn't
-            # passed.
-            fr.append(float(val.strip('% ')) * maxfield/100.)
-        else:
-            fr.append(val)
-
-    # Convert to len 4
-    if len(fr) == 2:
-        if fr[0] < 0:
-            fr = [fr[0], fr[1], -fr[1], -fr[0]]
-        else:
-            fr = [-fr[1], -fr[0], fr[0], fr[1]]
-
-    # TODO: make sure fitrange makes sense.
-    assert fr[0] < fr[1] < fr[2] < fr[3]
-
-    return fr
-
 
 def split(H, M, shortest=2, loops=False):
     '''
@@ -813,15 +648,6 @@ def smooth(H, M, window=5):
 ########### These operate on a list of (V, I) #####################
 
 
-
-def filt_datalist(datalist, window=5):
-    ''' Filter a list of data with moving average '''
-    fdata = []
-    for d in datalist:
-        fdata.append(moving_avg(d, window))
-    return fdata
-
-
 def concat(datalist):
     ''' Put split data back together '''
     concatdata = [[],[]]
@@ -837,13 +663,17 @@ def concat(datalist):
 ###################################################################
 
 
-def write_pngs(data, directory, **kwargs):
-    ''' Write a png of each of the iv loops to disk.  kwargs passed to plot() '''
+def write_pngs(data, directory, plotfunc=plot_one_iv, **kwargs):
+    '''
+    Write a png of each of the iv loops to disk.  kwargs passed to plot()
+    
+    TODO: Pass an arbitrary plotting function
+    '''
     if not os.path.isdir(directory):
         os.makedirs(directory)
     fig, ax = plt.subplots()
     for i, ivloop in enumerate(data):
-        line = plot_one_iv(ivloop, ax=ax, **kwargs)
+        line = plotfunc(ivloop, ax=ax, **kwargs)
         title = 'Loop {}'.format(i)
         if 'filepath' in ivloop.keys():
             fp = ivloop['filepath']
@@ -944,9 +774,10 @@ def plot_switching_v(datalist, level, **kwargs):
 
 ### This makes a movie from png frames
 
-def frames_to_mp4(directory, base='Loop', outname='out'):
+def frames_to_mp4(directory, prefix='Loop', outname='out'):
     # Send command to create video with ffmpeg
+    # TODO: have it recognize the file prefix
     cmd = (r'cd "{}" & ffmpeg -framerate 5 -i {}_%03d.png -c:v libx264 '
             '-r 15 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" '
-            '{}.mp4').format(directory, base, outname)
+            '{}.mp4').format(directory, prefix, outname)
     os.system(cmd)
