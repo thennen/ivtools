@@ -57,6 +57,8 @@ from operator import getitem
 pjoin = os.path.join
 splitext = os.path.splitext
 
+# TODO: Also save somehow to this retarded format:
+
 def load_from_txt(directory, pattern, **kwargs):
     ''' Load list of loops from separate text files. Specify files by glob
     pattern.  kwargs are passed to loadtxt'''
@@ -138,13 +140,14 @@ def load_from_txt(directory, pattern, **kwargs):
     #return np.array(list(txt_iter()))
     #return (list(txt_iter()), dict(source_directory=directory), [dict(filepath=fp) for fp in fpaths])
     datalist = []
-    for fp, df in zip(fpaths, txt_iter()):
+    for i, (fp, df) in enumerate(zip(fpaths, txt_iter())):
         mtime = os.path.getmtime(fp)
         ctime = os.path.getctime(fp)
         longnames = {'I':'Current', 'V':'Voltage'}
         units = {'I':'A', 'V':'V'}
         dd = dotdict(I=np.array(df['I']), V=np.array(df['V']), filepath=fp,
-                     mtime=mtime, ctime=ctime, units=units, longnames=longnames)
+                     mtime=mtime, ctime=ctime, units=units, longnames=longnames,
+                     index=i)
         datalist.append(dd)
     iv = np.array(datalist)
 
@@ -158,7 +161,6 @@ def load_from_txt(directory, pattern, **kwargs):
 
 def write_data(data, fn):
     ''' Write list of [Vin, Vout] to disk '''
-    # TODO: switch to less retarded format
     foldpath = datafolderpath()
     np.savez(os.path.join(foldpath, fn), *data)
 
@@ -186,7 +188,6 @@ def load_data(fn):
     return d_out
 
 
-
 ###################################################################
 # Functions for data analysis                                    ##
 ###################################################################
@@ -197,6 +198,8 @@ def ivfunc(func):
     '''
     Decorator which allows the same function to be used on a single loop, as
     well as a container of loops.
+
+    Don't know if this is a good idea or not ...
 
     Decorated function should take a single loop and return anything
 
@@ -264,6 +267,15 @@ def apply(data, func, column):
     dataout = data.copy()
     dataout[column] = func(dataout[column])
     return dataout
+
+def insert(data, key, vals):
+    # Insert values into ivloop objects
+    for d,v in zip(data, vals):
+        d[key] = v
+
+def extract(data, key):
+    # Get array of values from ivloop objects
+    return array([d[key] for d in data])
 
 @ivfunc
 def dV_sign(iv):
@@ -352,25 +364,50 @@ def largest_monotonic(data, column='I'):
     return dataout
 
 @ivfunc
-def jumps(loop, column='I', thresh=0.25):
+def jumps(loop, column='I', thresh=0.25, abs=True):
     ''' Find jumps in the data.  thresh given as fraction of maximum absolute value.  Deal with it.
     return indices, values of jumps
+    pass abs=False if you care about the sign of the jump
     '''
     d = diff(loop[column])
     # Find jumps greater than thresh * 100% of the maximum
-    jumps = np.where(abs(d) > thresh * np.max(np.abs(loop[column])))[0]
+    if abs:
+        jumps = np.where(np.abs(d) > thresh * np.max(np.abs(loop[column])))[0]
+    elif thresh < 0:
+        jumps = np.where(d < thresh * np.max(np.abs(loop[column])))[0]
+    else:
+        jumps = np.where(d > thresh * np.max(np.abs(loop[column])))[0]
     return jumps, d[jumps]
 
 @ivfunc
 def njumps(loop, **kwargs):
     j = jumps(loop, **kwargs)
-    return len(j[0])
+    njumps = len(j[0])
+    loop['njumps'] = njumps
+    return njumps
 
 
 @ivfunc
-def first_jump(loop):
-    pass
+def first_jump(loop, **kwargs):
+    j = jumps(loop, **kwargs)
+    if any(j):
+        first_jump = j[0][0]
+    else:
+        first_jump = np.nan
+    loop['first_jump'] = firstjump
+    return first_jump
 
+
+def pindex(loops, column, index):
+    # Index some column of all the ivloops in parallel
+    # Understands list[nan] --> nan
+    vals = []
+    for l,i in zip(loops, index):
+        if isnan(i):
+            vals.append(np.nan)
+        else:
+            vals.append(l[column][i])
+    return array(vals)
 
 
 
@@ -468,7 +505,7 @@ def plot_one_iv(iv, ax=None, x='V', y='I', maxsamples=10000, **kwargs):
 
     return ax.plot(X, Y, **kwargs)[0]
 
-def plotiv(data, ax=None, x='V', y='I', maxsamples=10000, cm='jet', **kwargs):
+def plotiv(data, x='V', y='I', ax=None, maxsamples=10000, cm='jet', **kwargs):
     '''
     IV loop plotting which can handle single or multiple loops.
     maxsamples : downsample to this number of data points if necessary
@@ -483,16 +520,25 @@ def plotiv(data, ax=None, x='V', y='I', maxsamples=10000, cm='jet', **kwargs):
     dtype = type(data)
     if dtype == np.ndarray:
         # There are many loops
-        line = []
-        # Pick colors
-        if isinstance(cm, str):
-            cmap = plt.cm.get_cmap(cm)
+        if not hasattr(data[0][x], '__iter__'):
+            # Probably referencing scalar values.
+            # No tests to make sure both x and y scalar values for all loops.
+            X = extract(data, x)
+            Y = extract(data, y)
+            line = ax.plot(X, Y, **kwargs)
+            ax.set_xlabel(x)
+            ax.set_ylabel(y)
         else:
-            cmap = cm
-        colors = [cmap(c) for c in np.linspace(0, 1, len(data))]
-        for iv, c in zip(data, colors):
-            kwargs.update(c=c)
-            line.append(plot_one_iv(iv, ax=ax, x=x, y=y, maxsamples=maxsamples, **kwargs))
+            line = []
+            # Pick colors
+            if isinstance(cm, str):
+                cmap = plt.cm.get_cmap(cm)
+            else:
+                cmap = cm
+            colors = [cmap(c) for c in np.linspace(0, 1, len(data))]
+            for iv, c in zip(data, colors):
+                kwargs.update(c=c)
+                line.append(plot_one_iv(iv, ax=ax, x=x, y=y, maxsamples=maxsamples, **kwargs))
     elif dtype == dotdict:
         line = plot_one_iv(data, ax, x=x, y=y, maxsamples=maxsamples, **kwargs)
     else:
