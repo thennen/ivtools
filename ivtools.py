@@ -256,6 +256,26 @@ def index_iv(data, index_function):
         dataout[sk] = dataout[sk][index]
     return dataout
 
+@ivfunc
+def slice_iv(data, stop, start=0, step=None):
+    '''
+    Slice all the data arrays inside an iv loop container at once.
+    start, stop can be functions that take the iv loop as argument
+    '''
+    lenI = len(data['I'])
+    splitkeys = [k for k,v in data.items() if (type(v) == np.ndarray and len(v) == lenI)]
+    dataout = data.copy()
+    if callable(start):
+        start = start(data)
+    if callable(stop):
+            stop = stop(data)
+    for sk in splitkeys:
+        # Apply the filter to all the relevant items
+        dataout[sk] = dataout[sk][slice(start, stop, step)]
+    return dataout
+
+
+
 # Don't know about the name of this one yet
 @ivfunc
 def apply(data, func, column):
@@ -364,19 +384,22 @@ def largest_monotonic(data, column='I'):
     return dataout
 
 @ivfunc
-def jumps(loop, column='I', thresh=0.25, abs=True):
-    ''' Find jumps in the data.  thresh given as fraction of maximum absolute value.  Deal with it.
-    return indices, values of jumps
+def jumps(loop, column='I', thresh=0.25, normalize=True, abs=True):
+    ''' Find jumps in the data.
+    if normalize=True, give thresh as fraction of maximum absolute value.
+    return (indices,), (values of jumps,)
     pass abs=False if you care about the sign of the jump
     '''
     d = diff(loop[column])
+    if normalize:
+        thresh = thresh * np.max(np.abs(loop[column]))
     # Find jumps greater than thresh * 100% of the maximum
     if abs:
-        jumps = np.where(np.abs(d) > thresh * np.max(np.abs(loop[column])))[0]
+        jumps = np.where(np.abs(d) > thresh )[0]
     elif thresh < 0:
-        jumps = np.where(d < thresh * np.max(np.abs(loop[column])))[0]
+        jumps = np.where(d < thresh)[0]
     else:
-        jumps = np.where(d > thresh * np.max(np.abs(loop[column])))[0]
+        jumps = np.where(d > thresh)[0]
     return jumps, d[jumps]
 
 @ivfunc
@@ -394,19 +417,31 @@ def first_jump(loop, **kwargs):
         first_jump = j[0][0]
     else:
         first_jump = np.nan
-    loop['first_jump'] = firstjump
+    loop['first_jump'] = first_jump
     return first_jump
+
+@ivfunc
+def last_jump(loop, **kwargs):
+    j = jumps(loop, **kwargs)
+    if any(j):
+        last_jump = j[0][-1]
+    else:
+        last_jump = np.nan
+    loop['last_jump'] = last_jump
+    return last_jump 
 
 
 def pindex(loops, column, index):
     # Index some column of all the ivloops in parallel
+    # "index" is a list of indices with same len as loops
     # Understands list[nan] --> nan
+    # TODO: index by a number contained in the ivloop object
     vals = []
     for l,i in zip(loops, index):
         if isnan(i):
             vals.append(np.nan)
         else:
-            vals.append(l[column][i])
+            vals.append(l[column][int(i)])
     return array(vals)
 
 
@@ -520,15 +555,7 @@ def plotiv(data, x='V', y='I', ax=None, maxsamples=10000, cm='jet', **kwargs):
     dtype = type(data)
     if dtype == np.ndarray:
         # There are many loops
-        if not hasattr(data[0][x], '__iter__'):
-            # Probably referencing scalar values.
-            # No tests to make sure both x and y scalar values for all loops.
-            X = extract(data, x)
-            Y = extract(data, y)
-            line = ax.plot(X, Y, **kwargs)
-            ax.set_xlabel(x)
-            ax.set_ylabel(y)
-        else:
+        if x is None or hasattr(data[0][x], '__iter__'):
             line = []
             # Pick colors
             if isinstance(cm, str):
@@ -539,6 +566,14 @@ def plotiv(data, x='V', y='I', ax=None, maxsamples=10000, cm='jet', **kwargs):
             for iv, c in zip(data, colors):
                 kwargs.update(c=c)
                 line.append(plot_one_iv(iv, ax=ax, x=x, y=y, maxsamples=maxsamples, **kwargs))
+        else:
+            # Probably referencing scalar values.
+            # No tests to make sure both x and y scalar values for all loops.
+            X = extract(data, x)
+            Y = extract(data, y)
+            line = ax.plot(X, Y, **kwargs)
+            ax.set_xlabel(x)
+            ax.set_ylabel(y)
     elif dtype == dotdict:
         line = plot_one_iv(data, ax, x=x, y=y, maxsamples=maxsamples, **kwargs)
     else:
@@ -823,7 +858,7 @@ def plot_switching_v(datalist, level, **kwargs):
 def frames_to_mp4(directory, prefix='Loop', outname='out'):
     # Send command to create video with ffmpeg
     # TODO: have it recognize the file prefix
-    cmd = (r'cd "{}" & ffmpeg -framerate 5 -i {}_%03d.png -c:v libx264 '
+    cmd = (r'cd "{}" & ffmpeg -framerate 10 -i {}_%03d.png -c:v libx264 '
             '-r 15 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" '
             '{}.mp4').format(directory, prefix, outname)
     os.system(cmd)
