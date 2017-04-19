@@ -39,6 +39,7 @@ Tyler Hennen 2017
 '''
 
 import numpy as np
+import matplotlib as mpl
 from matplotlib import pyplot as plt
 import pandas as pd
 import heapq
@@ -261,14 +262,17 @@ def slice_iv(data, stop, start=0, step=None):
     '''
     Slice all the data arrays inside an iv loop container at once.
     start, stop can be functions that take the iv loop as argument
+    if those functions return nan, start defaults to 0 and stop to -1
     '''
     lenI = len(data['I'])
     splitkeys = [k for k,v in data.items() if (type(v) == np.ndarray and len(v) == lenI)]
     dataout = data.copy()
     if callable(start):
         start = start(data)
+        if np.isnan(start): start = 0
     if callable(stop):
-            stop = stop(data)
+        stop = stop(data)
+        if np.isnan(stop): stop = -1
     for sk in splitkeys:
         # Apply the filter to all the relevant items
         dataout[sk] = dataout[sk][slice(start, stop, step)]
@@ -334,7 +338,7 @@ def interpolate(data, interpvalues, column='I'):
     # not doing this anymore, but might want the code for something else
     #saturated = abs(dataout[column]/dataout[column][-1]) - 1 < 0.0001
     #lastindex = np.where(saturated)[0][0]
-    #dataout[column] = dataout[column][:lastindex]
+    #dataout[column] = dataout[column][:lastindex
 
     for ik in interpkeys:
         dataout[ik] = np.interp(interpvalues, dataout[column], dataout[ik])
@@ -558,11 +562,16 @@ def plotiv(data, x='V', y='I', ax=None, maxsamples=10000, cm='jet', **kwargs):
         if x is None or hasattr(data[0][x], '__iter__'):
             line = []
             # Pick colors
-            if isinstance(cm, str):
-                cmap = plt.cm.get_cmap(cm)
+            # you can pass a list of colors, or a colormap
+            if isinstance(cm, list):
+                colors = cm
             else:
-                cmap = cm
-            colors = [cmap(c) for c in np.linspace(0, 1, len(data))]
+                if isinstance(cm, str):
+                    # Str refers to the name of a colormap
+                    cmap = plt.cm.get_cmap(cm)
+                elif isinstance(cm, mpl.colors.LinearSegmentedColormap):
+                    cmap = cm
+                colors = [cmap(c) for c in np.linspace(0, 1, len(data))]
             for iv, c in zip(data, colors):
                 kwargs.update(c=c)
                 line.append(plot_one_iv(iv, ax=ax, x=x, y=y, maxsamples=maxsamples, **kwargs))
@@ -599,34 +608,26 @@ def moving_avg(data, window=5):
 
     return {'I':I, 'V':V}
 
+@ivfunc
+def resistance(data, Vrange=(0, 0.5)):
+    ''' Calculate resistance by linear fit '''
+    piv = index_iv(data, lambda l: l.V >= Vrange[0])
+    iiv = increasing(piv)
+    linearpart = index_iv(iiv, lambda l: l.V <= Vrange[1])
+
+    if len(linearpart.V) > 1:
+        params = polyfit(linearpart.V, linearpart.I, 1)
+    else:
+        params = array([np.nan, np.nan]))
+
+    R = 1 / params[0]
+    # What to do about units? have to know I and V units.
+    return R
+
+
 #**************************************
 #**** Not modified yet for new datatype
 #**************************************
-
-def resistance(data, R2=2000., fitrange=None):
-    ''' Try to calculate resistance from Vin, Vout curve, given resistance used
-    in divider
-
-    fitrange : (-V1, +V2) range to fit data for slope calculation
-    '''
-    #Vin = np.array(data[1])
-    #Vout = np.array(data[0])
-
-    # Assume data is already in np arrays
-    Vin = data[1]
-    Vout = data[0]
-    if fitrange is not None:
-        mask = (Vout > fitrange[0]) & (Vout < fitrange[1])
-        Vin = Vin[mask]
-        Vout = Vout[mask]
-    slope = np.polyfit(Vout, Vin/GAIN['B'], 1)[0]
-    # For series resistor
-    # R = R2 * (1/slope - 1)
-
-    # For compliance circuit.
-    R = R2 / slope
-
-    return R
 
 
 def fast_resistance(data, R2=2000., V=0.1, delta=0.01, origin=(0, 0)):
@@ -767,6 +768,56 @@ def write_pngs(data, directory, plotfunc=plot_one_iv, **kwargs):
         ax.set_title(title)
         fig.savefig(os.path.join(directory, fname))
         ax.cla()
+
+def write_frames(data, directory, startloopnum=0):
+    '''
+    Write set of ivloops to disk to make a movie which shows their evolution nicely
+    I rewrote this ten times before decided to make it a function
+    probably there's a better version in ipython history
+    '''
+    if not os.path.isdir(directory):
+        os.makedirs(directory)
+    fig, ax = plt.subplots()
+    # Plot them all on top of each other transparently for reference
+    plotiv(data, color='gray', linewidth=.5, alpha=.01, ax=ax)
+    #colors = plt.cm.rainbow(arange(len(data))/len(data))
+    colors = ['black'] * len(data)
+    i = 0
+    for l,c in zip(data, colors):
+        plotiv(l, ax=ax, color=c)
+        title('Loop {}'.format(i+startloopnum))
+        plt.savefig(os.path.join(directory, 'Loop_{:03d}'.format(i)))
+        del ax.lines[-1]
+        i += 1
+
+
+def write_frames_with_subview(data, directory, startloopnum=0):
+    '''
+    this one has two axes, one has a smaller fixed scale for looking at a detail
+    '''
+    if not os.path.isdir(directory):
+        os.makedirs(directory)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12,6))
+    # Plot them all on top of each other transparently for reference
+    plotiv(data, color='gray', linewidth=.5, alpha=.01, ax=ax1)
+    #colors = plt.cm.rainbow(arange(len(data))/len(data))
+    colors = ['black'] * len(data)
+    i = 0
+    for l,c in zip(data, colors):
+        plotiv(l, ax=ax1, color=c)
+        # Also split into increasing/decreasing
+        plotiv(decreasing(l), ax=ax2, color='blue', label='neg. sweep')
+        plotiv(increasing(l), ax=ax2, color='red', label='pos. sweep')
+        ax1.set_title('Loop {}'.format(i+startloopnum))
+        ax2.set_title('Loop {} (subview)'.format(i+startloopnum))
+        ax2.set_xlim(0, 2)
+        ax2.set_ylim(0, .0002)
+        ax2.legend()
+        plt.savefig(os.path.join(directory, 'Loop_{:03d}'.format(i)))
+        del ax1.lines[-1]
+        del ax2.lines[-1]
+        del ax2.lines[-1]
+        i += 1
 
 
 ### Not modified for new data type

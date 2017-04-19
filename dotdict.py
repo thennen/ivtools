@@ -31,6 +31,13 @@ class dotdict(dict):
         super(dotdict, self).__delitem__(key)
         del self.__dict__[key]
 
+    # These two are supposed to make pickle work ..
+    def __getstate__(self):
+        return self.__dict__
+
+    def __setstate__(self, d):
+        self.__dict__.update(d)
+
     # Is this ok?
     def copy(self):
         return self.__class__(self)
