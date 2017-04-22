@@ -618,7 +618,7 @@ def resistance(data, Vrange=(0, 0.5)):
     if len(linearpart.V) > 1:
         params = polyfit(linearpart.V, linearpart.I, 1)
     else:
-        params = array([np.nan, np.nan]))
+        params = array([np.nan, np.nan])
 
     R = 1 / params[0]
     # What to do about units? have to know I and V units.
