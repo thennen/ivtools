@@ -394,7 +394,7 @@ def jumps(loop, column='I', thresh=0.25, normalize=True, abs=True):
     return (indices,), (values of jumps,)
     pass abs=False if you care about the sign of the jump
     '''
-    d = diff(loop[column])
+    d = np.diff(loop[column])
     if normalize:
         thresh = thresh * np.max(np.abs(loop[column]))
     # Find jumps greater than thresh * 100% of the maximum
@@ -417,7 +417,7 @@ def njumps(loop, **kwargs):
 @ivfunc
 def first_jump(loop, **kwargs):
     j = jumps(loop, **kwargs)
-    if any(j):
+    if np.any(j):
         first_jump = j[0][0]
     else:
         first_jump = np.nan
@@ -427,7 +427,7 @@ def first_jump(loop, **kwargs):
 @ivfunc
 def last_jump(loop, **kwargs):
     j = jumps(loop, **kwargs)
-    if any(j):
+    if np.any(j):
         last_jump = j[0][-1]
     else:
         last_jump = np.nan
@@ -442,11 +442,11 @@ def pindex(loops, column, index):
     # TODO: index by a number contained in the ivloop object
     vals = []
     for l,i in zip(loops, index):
-        if isnan(i):
+        if np.isnan(i):
             vals.append(np.nan)
         else:
             vals.append(l[column][int(i)])
-    return array(vals)
+    return np.array(vals)
 
 
 
@@ -618,7 +618,7 @@ def resistance(data, Vrange=(0, 0.5)):
     if len(linearpart.V) > 1:
         params = polyfit(linearpart.V, linearpart.I, 1)
     else:
-        params = array([np.nan, np.nan])
+        params = np.array([np.nan, np.nan])
 
     R = 1 / params[0]
     # What to do about units? have to know I and V units.
