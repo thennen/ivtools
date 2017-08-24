@@ -60,13 +60,18 @@ splitext = os.path.splitext
 
 # TODO: Also save somehow to this retarded format:
 
+# Dotdict version
 def load_from_txt(directory, pattern, **kwargs):
     ''' Load list of loops from separate text files. Specify files by glob
-    pattern.  kwargs are passed to loadtxt'''
+    pattern.  Does not look into subdirectories. kwargs are passed to loadtxt
+    
+    I am making an attempt to handle all of the different txt formats I have seen come from various places at IWEII.
+    '''
     fnames = fnmatch.filter(os.listdir(directory), pattern)
 
     # Try to sort by file number, even if fixed width numbers are not used
     # For now I will assume the filename ends in _(somenumber)
+    # If it doesn't, they will stay in standard sort order
     try:
         fnames.sort(key=lambda fn: int(splitext(fn.split('_')[-1])[0]))
     except:
@@ -94,67 +99,86 @@ def load_from_txt(directory, pattern, **kwargs):
         # Using pandas here only because its read_csv can handle comma decimals easily..
         # Will convert back to numpy arrays.
         for fp in fpaths:
-            # TODO: Guess which column has Voltage and Current based on various
-            # different names people give them.  Here it seems the situation
-            # is very bad and sometimes there are no delimiters in the header.
-            # Even this is not consistent.
+            # Here it seems the situation with file formats is very bad and sometimes there are no
+            # delimiters in the column names row. Even this is not consistent.
 
-            # For now, read the first row and try to make sense of it
+            # Read the first row and try to make sense of it
+            # Use it to find the column names
+            # Save the header lines, including the column name line
+            header = []
             with open(fp, 'r') as f:
-                header = f.readline()
-                if header == '*********** I(V) ***********\n':
+                firstline = f.readline()
+                header.append(firstline)
+                if firstline == '*********** I(V) ***********\n':
                     skiprows = 8
                     for _ in range(7):
-                        header = f.readline()
+                        header.append(f.readline())
+                if firstline.startswith('linestoskip:'):
+                    # This is a really dumb way to specify where the data starts.
+                    skiprows = int(firstline[13:])
+                    # There are two \n on one of the lines ....
+                    skiprows += 1
+                    for _ in range(skiprows - 1):
+                        header.append(f.readline())
                 else:
                     skiprows = 1
+                colnameline = header[-1].strip()
                 # Try to split it by the normal delimiter
-                splitheader = header.split(readcsv_args['sep'])
+                splitheader = colnameline.split(readcsv_args['sep'])
                 if len(splitheader) > 1:
                     # Probably these are the column names?
                     colnames = splitheader
                 else:
                     # The other format that I have seen is like 'col name [unit]'
                     # with a random number of spaces interspersed. Split after ].
-                    colnames = re.findall('[^\]]+\]', header)
+                    colnames = re.findall('[^\]]+\]', colnameline)
                     colnames = [c.strip() for c in colnames]
 
             df = pd.read_csv(fp, skiprows=skiprows, names=colnames, index_col=False, **readcsv_args)
 
-            # These will be recognized as the Voltage and Current columns
-            Vnames = ['Voltage Source (V)', 'Voltage [V]']
-            Inames = ['Current Probe (A)', 'Current [A]']
-            # Rename columns
+            # Want a standard name for the voltage and current columns.  Try to rename them.
+            stdVname = 'V'
+            stdIname = 'I'
+            # These will also be recognized as the Voltage and Current columns
+            Vnames = ['Voltage Source (V)', 'Voltage [V]', 'V1']
+            Inames = ['Current Probe (A)', 'Current [A]', 'I1']
             dfcols = df.columns
-            if 'V' not in dfcols:
+            if stdVname not in dfcols:
                 for Vn in Vnames:
                     if Vn in dfcols:
-                        df.rename(columns={Vn:'V'}, inplace=True)
-            if 'I' not in dfcols:
+                        df.rename(columns={Vn:stdVname}, inplace=True)
+            if stdIname not in dfcols:
                 for In in Inames:
                     if In in dfcols:
-                        df.rename(columns={In:'I'}, inplace=True)
-            yield df
+                        df.rename(columns={In:stdIname}, inplace=True)
+            if stdVname not in df.columns:
+                print('Did not identify Voltage column!')
+            if stdIname not in df.columns:
+                print('Did not identify Current column!')
+            yield df, header
     # Have to make an intermediate list?  Hopefully this does not take too much time/memory
     # Probably it is not a lot of data if it came from a csv ....
     # This doesn't work because it tries to cast each dataframe into an array first ...
     #return np.array(list(txt_iter()))
     #return (list(txt_iter()), dict(source_directory=directory), [dict(filepath=fp) for fp in fpaths])
     datalist = []
-    for i, (fp, df) in enumerate(zip(fpaths, txt_iter())):
+    for i, (fp, (df, header)) in enumerate(zip(fpaths, txt_iter())):
         mtime = os.path.getmtime(fp)
         ctime = os.path.getctime(fp)
         longnames = {'I':'Current', 'V':'Voltage'}
         units = {'I':'A', 'V':'V'}
-        dd = dotdict(I=np.array(df['I']), V=np.array(df['V']), filepath=fp,
-                     mtime=mtime, ctime=ctime, units=units, longnames=longnames,
-                     index=i)
+        # Could also parse metadata out of the header..
+        dd = dotdict(filepath=fp, mtime=mtime, ctime=ctime, units=units, longnames=longnames,
+                     index=i, header=header)
+        for c in df.columns:
+            dd[c] = np.array(df[c])
         datalist.append(dd)
     iv = np.array(datalist)
 
     # regular dict version
     #iv = np.array([{'I':np.array(df['I']), 'V':np.array(df['V']), 'filepath':fp} for fp, df in zip(fpaths, txt_iter())])
     return dotdict(iv=iv, source_dir=directory)
+
 
 #**************************************
 #**** Not modified yet for new datatype
@@ -212,6 +236,9 @@ def ivfunc(func):
         if dtype == np.ndarray:
             # Assuming it's an ndarray of iv dicts
             return np.array([func(d, *args, **kwargs) for d in data])
+        if dtype == list:
+            # Assuming it's list of iv dicts
+            return [func(d, *args, **kwargs) for d in data]
         elif dtype == dotdict:
             return(func(data, *args, **kwargs))
         else:
@@ -557,7 +584,7 @@ def plotiv(data, x='V', y='I', ax=None, maxsamples=10000, cm='jet', **kwargs):
         fig, ax = plt.subplots()
 
     dtype = type(data)
-    if dtype == np.ndarray:
+    if (dtype == np.ndarray) or (dtype == list):
         # There are many loops
         if x is None or hasattr(data[0][x], '__iter__'):
             line = []
